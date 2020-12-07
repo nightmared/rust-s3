@@ -40,32 +40,9 @@ pub async fn etag_for_path(path: impl AsRef<Path>) -> Result<String> {
 }
 
 pub async fn read_chunk<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>> {
-    const LOCAL_CHUNK_SIZE: usize = 8388;
     let mut chunk = Vec::with_capacity(CHUNK_SIZE);
-    loop {
-        let mut buffer = [0; LOCAL_CHUNK_SIZE];
-        let mut take = reader.take(LOCAL_CHUNK_SIZE as u64);
-        let n = take.read(&mut buffer).await?;
-        if n < LOCAL_CHUNK_SIZE {
-            buffer.reverse();
-            let mut trim_buffer = buffer
-                .iter()
-                .skip_while(|x| **x == 0)
-                .copied()
-                .collect::<Vec<u8>>();
-            trim_buffer.reverse();
-            chunk.extend_from_slice(&trim_buffer);
-            chunk.shrink_to_fit();
-            break;
-        } else {
-            chunk.extend_from_slice(&buffer);
-            if chunk.len() >= CHUNK_SIZE {
-                break;
-            } else {
-                continue;
-            }
-        }
-    }
+    let mut take = reader.take(CHUNK_SIZE as u64);
+    take.read_to_end(&mut chunk).await?;
     Ok(chunk)
 }
 
@@ -135,6 +112,7 @@ impl From<&http::HeaderMap> for HeadObjectResult {
 #[cfg(test)]
 mod test {
     use crate::utils::etag_for_path;
+    use futures::io::Cursor;
     use std::fs::File;
     use std::io::prelude::*;
 
@@ -155,6 +133,28 @@ mod test {
 
         std::fs::remove_file(path).unwrap_or_else(|_| {});
 
-        assert_eq!(etag, "ae890066cc055c740b3dc3c8854a643b-2");
+        assert_eq!(etag, "e438487f09f09c042b2de097765e5ac2-2");
+    }
+
+    #[tokio::test]
+    async fn test_read_chunk_all_zero() {
+        let blob = vec![0u8; 10_000];
+        let mut blob = Cursor::new(blob);
+
+        let result = super::read_chunk(&mut blob).await.unwrap();
+
+        assert_eq!(result.len(), 10_000);
+    }
+
+    #[tokio::test]
+    async fn test_read_chunk_multi_chunk() {
+        let blob = vec![1u8; 10_000_000];
+        let mut blob = Cursor::new(blob);
+
+        let result = super::read_chunk(&mut blob).await.unwrap();
+        assert_eq!(result.len(), crate::bucket::CHUNK_SIZE);
+
+        let result = super::read_chunk(&mut blob).await.unwrap();
+        assert_eq!(result.len(), 1_611_392);
     }
 }
