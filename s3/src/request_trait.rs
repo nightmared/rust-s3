@@ -190,7 +190,7 @@ pub trait Request {
 
         // Append to url_path
         match self.command() {
-            Command::InitiateMultipartUpload => url_str.push_str("?uploads"),
+            Command::InitiateMultipartUpload { .. } => url_str.push_str("?uploads"),
             Command::AbortMultipartUpload { upload_id } => {
                 url_str.push_str(&format!("?uploadId={}", upload_id))
             }
@@ -369,6 +369,16 @@ pub trait Request {
             headers.insert(RANGE, range.parse().unwrap());
         } else if let Command::CreateBucket { ref config } = self.command() {
             config.add_headers(&mut headers)?;
+        }
+
+        if let Command::PutObject { custom_headers, .. }
+        | Command::InitiateMultipartUpload { custom_headers } = self.command()
+        {
+            if let Some(custom_headers) = custom_headers {
+                for (name, value) in custom_headers.iter() {
+                    headers.insert(name.clone(), value.clone());
+                }
+            }
         }
 
         // This must be last, as it signs the other headers, omitted if no secret key is provided

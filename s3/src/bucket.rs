@@ -525,6 +525,60 @@ impl Bucket {
         Ok(request.response_data_to_writer(writer).await?)
     }
 
+    /// Stream file from local path to s3, generic over T: Write, with custom headers.
+    ///
+    /// # Example:
+    ///
+    /// ```rust,no_run
+    /// use s3::bucket::Bucket;
+    /// use s3::creds::Credentials;
+    /// use std::fs::File;
+    /// use std::io::Write;
+    /// use http::header::{HeaderMap, HeaderName, HeaderValue};
+    /// use anyhow::Result;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<()> {
+    ///
+    /// let bucket_name = "rust-s3-test";
+    /// let region = "us-east-1".parse()?;
+    /// let credentials = Credentials::default()?;
+    /// let bucket = Bucket::new(bucket_name, region, credentials)?;
+    /// let path = "path";
+    /// let test: Vec<u8> = (0..1000).map(|_| 42).collect();
+    /// let mut file = File::create(path)?;
+    /// file.write_all(&test)?;
+    ///
+    /// let mut headers = HeaderMap::new();
+    /// headers.insert(HeaderName::from_static("x-amz-meta-origin"), HeaderValue::from_static("Europe/France"));
+    ///
+    /// // Async variant with `tokio` or `async-std` features
+    /// let status_code = bucket.put_object_stream_with_headers(path, "/path", Some(headers)).await?;
+    ///
+    /// // `sync` feature will produce an identical method
+    /// #[cfg(feature = "sync")]
+    /// let status_code = bucket.put_object_stream_with_headers(path, "/path", Some(headers))?;
+    ///
+    /// // Blocking variant, generated with `blocking` feature in combination
+    /// // with `tokio` or `async-std` features.
+    /// #[cfg(feature = "blocking")]
+    /// let status_code = bucket.put_object_stream_with_headers_blocking(path, "/path", Some(headers))?;
+    /// #
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[maybe_async::maybe_async]
+    pub async fn put_object_stream_with_headers(
+        &self,
+        path: impl AsRef<Path>,
+        s3_path: impl AsRef<str>,
+        custom_headers: Option<HeaderMap>,
+    ) -> Result<u16> {
+        let mut file = File::open(path).await?;
+        self._put_object_stream(&mut file, s3_path.as_ref(), custom_headers)
+            .await
+    }
+
     /// Stream file from local path to s3, generic over T: Write.
     ///
     /// # Example:
@@ -569,7 +623,7 @@ impl Bucket {
         path: impl AsRef<Path>,
         s3_path: impl AsRef<str>,
     ) -> Result<u16> {
-        self._put_object_stream(&mut File::open(path).await?, s3_path.as_ref())
+        self.put_object_stream_with_headers(path, s3_path, None)
             .await
     }
 
@@ -578,8 +632,11 @@ impl Bucket {
         &self,
         reader: &mut R,
         s3_path: &str,
+        custom_headers: Option<HeaderMap>,
     ) -> Result<u16> {
-        let command = Command::InitiateMultipartUpload;
+        let command = Command::InitiateMultipartUpload {
+            custom_headers: custom_headers.clone(),
+        };
         let request = RequestImpl::new(self, &s3_path, command);
         let (data, code) = request.response_data(false).await?;
         let msg: InitiateMultipartUploadResponse =
@@ -598,7 +655,13 @@ impl Bucket {
                     let abort = Command::AbortMultipartUpload { upload_id };
                     let abort_request = RequestImpl::new(self, &path, abort);
                     let (_, _code) = abort_request.response_data(false).await?;
-                    self.put_object(s3_path, chunk.as_slice()).await?;
+                    self.put_object_with_content_type_and_headers(
+                        s3_path,
+                        chunk.as_slice(),
+                        "application/octet-stream",
+                        custom_headers.clone(),
+                    )
+                    .await?;
                     break;
                 } else {
                     part_number += 1;
@@ -607,6 +670,7 @@ impl Bucket {
                         content: &chunk,
                         content_type: "application/octet-stream",
                         multipart: Some(Multipart::new(part_number, upload_id)), // upload_id: &msg.upload_id,
+                        custom_headers,
                     };
                     let request = RequestImpl::new(self, &path, command);
                     let (data, _code) = request.response_data(true).await?;
@@ -638,6 +702,7 @@ impl Bucket {
                     content: &chunk,
                     content_type: "application/octet-stream",
                     multipart: Some(Multipart::new(part_number, upload_id)), // upload_id: &msg.upload_id,
+                    custom_headers: custom_headers.clone(),
                 };
                 let request = RequestImpl::new(self, &path, command);
                 let (data, _code) = request.response_data(true).await?;
@@ -649,8 +714,15 @@ impl Bucket {
     }
 
     #[maybe_async::sync_impl]
-    fn _put_object_stream<R: Read>(&self, reader: &mut R, s3_path: &str) -> Result<u16> {
-        let command = Command::InitiateMultipartUpload;
+    fn _put_object_stream<R: Read>(
+        &self,
+        reader: &mut R,
+        s3_path: &str,
+        custom_headers: Option<HeaderMap>,
+    ) -> Result<u16> {
+        let command = Command::InitiateMultipartUpload {
+            custom_headers: custom_headers.clone(),
+        };
         let request = RequestImpl::new(self, &s3_path, command);
         let (data, code) = request.response_data(false)?;
         let msg: InitiateMultipartUploadResponse =
@@ -672,7 +744,12 @@ impl Bucket {
                     };
                     let abort_request = RequestImpl::new(self, &path, abort);
                     let (_, _code) = abort_request.response_data(false)?;
-                    self.put_object(s3_path, chunk.as_slice())?;
+                    self.put_object_with_content_type_and_headers(
+                        s3_path,
+                        chunk.as_slice(),
+                        "application/octet-stream",
+                        custom_headers,
+                    )?;
                     break;
                 } else {
                     part_number += 1;
@@ -681,6 +758,7 @@ impl Bucket {
                         content: &chunk,
                         content_type: "application/octet-stream",
                         multipart: Some(Multipart::new(part_number, upload_id)), // upload_id: &msg.upload_id,
+                        custom_headers,
                     };
                     let request = RequestImpl::new(self, &path, command);
                     let (data, _code) = request.response_data(true)?;
@@ -710,6 +788,7 @@ impl Bucket {
                     content: &chunk,
                     content_type: "application/octet-stream",
                     multipart: Some(Multipart::new(part_number, upload_id)),
+                    custom_headers: None,
                 };
                 let request = RequestImpl::new(self, &path, command);
                 let (data, _code) = request.response_data(true)?;
@@ -859,6 +938,61 @@ impl Bucket {
         Ok((header_object, status))
     }
 
+    /// Put into an S3 bucket, with explicit content-type and headers.
+    ///
+    /// # Example:
+    ///
+    /// ```no_run
+    /// use s3::bucket::Bucket;
+    /// use s3::creds::Credentials;
+    /// use anyhow::Result;
+    /// use http::header::{HeaderMap, HeaderName, HeaderValue};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<()> {
+    ///
+    /// let bucket_name = "rust-s3-test";
+    /// let region = "us-east-1".parse()?;
+    /// let credentials = Credentials::default()?;
+    /// let bucket = Bucket::new(bucket_name, region, credentials)?;
+    /// let content = "I want to go to S3".as_bytes();
+    ///
+    /// let mut headers = HeaderMap::new();
+    /// headers.insert(HeaderName::from_static("x-amz-meta-origin"), HeaderValue::from_static("Europe/France"));
+    ///
+    /// // Async variant with `tokio` or `async-std` features
+    /// let (_, code) = bucket.put_object_with_content_type_and_headers("/test.file", content, "text/plain", Some(headers)).await?;
+    ///
+    /// // `sync` feature will produce an identical method
+    /// #[cfg(feature = "sync")]
+    /// let (_, code) = bucket.put_object_with_content_type_and_headers("/test.file", content, "text/plain", Some(headers))?;
+    ///
+    /// // Blocking variant, generated with `blocking` feature in combination
+    /// // with `tokio` or `async-std` features.
+    /// #[cfg(feature = "blocking")]
+    /// let (_, code) = bucket.put_object_with_content_type_and_headers_blocking("/test.file", content, "text/plain", Some(headers))?;
+    /// #
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[maybe_async::maybe_async]
+    pub async fn put_object_with_content_type_and_headers<S: AsRef<str>>(
+        &self,
+        path: S,
+        content: &[u8],
+        content_type: &str,
+        custom_headers: Option<HeaderMap>,
+    ) -> Result<(Vec<u8>, u16)> {
+        let command = Command::PutObject {
+            content,
+            content_type,
+            multipart: None,
+            custom_headers,
+        };
+        let request = RequestImpl::new(self, path.as_ref(), command);
+        Ok(request.response_data(true).await?)
+    }
+
     /// Put into an S3 bucket, with explicit content-type.
     ///
     /// # Example:
@@ -899,13 +1033,8 @@ impl Bucket {
         content: &[u8],
         content_type: &str,
     ) -> Result<(Vec<u8>, u16)> {
-        let command = Command::PutObject {
-            content,
-            content_type,
-            multipart: None,
-        };
-        let request = RequestImpl::new(self, path.as_ref(), command);
-        Ok(request.response_data(true).await?)
+        self.put_object_with_content_type_and_headers(path, content, content_type, None)
+            .await
     }
 
     /// Put into an S3 bucket.
@@ -947,8 +1076,13 @@ impl Bucket {
         path: S,
         content: &[u8],
     ) -> Result<(Vec<u8>, u16)> {
-        self.put_object_with_content_type(path, content, "application/octet-stream")
-            .await
+        self.put_object_with_content_type_and_headers(
+            path,
+            content,
+            "application/octet-stream",
+            None,
+        )
+        .await
     }
 
     fn _tags_xml<S: AsRef<str>>(&self, tags: &[(S, S)]) -> String {
