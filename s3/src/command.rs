@@ -69,7 +69,12 @@ pub enum Command<'a> {
     PutObjectTagging {
         tags: &'a str,
     },
-
+    ListMultipartUploads {
+        prefix: Option<&'a str>,
+        delimiter: Option<&'a str>,
+        key_marker: Option<String>,
+        max_uploads: Option<usize>,
+    },
     ListBucket {
         prefix: String,
         delimiter: Option<String>,
@@ -114,6 +119,7 @@ impl<'a> Command<'a> {
             | Command::ListBucket { .. }
             | Command::GetBucketLocation
             | Command::GetObjectTagging
+            | Command::ListMultipartUploads { .. }
             | Command::PresignGet { .. } => HttpMethod::Get,
             Command::PutObject { .. }
             | Command::PutObjectTagging { .. }
